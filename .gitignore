@@ -1,0 +1,36 @@
+# ── Credentials / sensitive files ────────────────────────────────────────────
+.env
+agent_platform_v2/
+
+# ── Personal / scratch ────────────────────────────────────────────────────────
+bundle_files.py
+bundled_output.txt
+notes
+test.json
+
+# ── Python artifacts ──────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.egg-info/
+dist/
+build/
+.venv/
+scripts/
+
+# ── Test ──────────────────────────────────────────────────────────────────────
+.pytest_cache/
+tests/results/
+
+# ── Type checking / linting ───────────────────────────────────────────────────
+.mypy_cache/
+.ruff_cache/
+
+# ── OS / editor noise ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

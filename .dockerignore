@@ -1,0 +1,54 @@
+# ── Credentials / sensitive files ────────────────────────────────────────────
+.env*
+!.env.example
+
+# ── Personal / scratch ────────────────────────────────────────────────────────
+bundle_files.py
+bundled_output.txt
+notes
+test.json
+
+# ── Python artifacts ──────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.egg-info/
+dist/
+build/
+wheels/
+.Python
+.venv/
+
+# ── Test ──────────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+tests/results/
+
+# ── Type checking / linting ───────────────────────────────────────────────────
+.mypy_cache/
+
+# ── Documentation ─────────────────────────────────────────────────────────────
+*.md
+docs/
+
+# ── Local development ─────────────────────────────────────────────────────────
+docker-compose*.yml
+scripts/
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+
+# ── OS / editor noise ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

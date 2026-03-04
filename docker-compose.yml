@@ -1,0 +1,73 @@
+networks:
+  app_network:
+    driver: bridge
+
+services:
+  # ── MongoDB ─────────────────────────────────────────────────────────────────
+  mongo:
+    image: mongo:8.2
+    restart: unless-stopped
+    networks:
+      - app_network      
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGODB_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGODB_DB}
+      MONGO_INITDB_APP_USER: ${MONGODB_APP_USER}
+      MONGO_INITDB_APP_PASSWORD: ${MONGODB_APP_PASSWORD}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+      - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/init.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── API (Production) ──────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    networks:
+      - app_network      
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  # ── API (Development) ─────────────────────────────────────────────────
+  api-dev:
+    build:
+      context: .
+      target: runtime
+    command: >
+      uvicorn app.main:app
+        --host 0.0.0.0
+        --port 8000
+        --reload  
+    networks:
+      - app_network      
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    # Match the working directory to the volume mount
+    working_dir: /app
+    volumes:
+      - ./app:/app/app
+    depends_on:
+      mongo:
+        condition: service_healthy
+    profiles:
+      - dev
+
+volumes:
+  mongo_data:
