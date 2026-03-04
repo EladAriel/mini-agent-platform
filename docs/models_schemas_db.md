@@ -53,6 +53,7 @@ classDiagram
 ```
 
 **Collection**: `tools`
+
 **Indexes**: `tenant_id` (for tenant-scoped queries)
 
 ---
@@ -108,6 +109,7 @@ erDiagram
 ```
 
 **Collection**: `agents`
+
 **Indexes**: `tenant_id`
 
 **Key Design:** Uses `Link[Tool]` for lazy loading - MongoDB stores only references (IDs), not full tool documents.
@@ -145,6 +147,7 @@ classDiagram
 ```
 
 **Collection**: `agent_runs`
+
 **Indexes**:
 - `tenant_id` — tenant isolation
 - `(tenant_id, agent_id)` — run history per agent

@@ -8,13 +8,13 @@ High-level overview of the full system — from Docker infrastructure to request
 
 ```mermaid
 flowchart TD
-    ENV[.env file] --> MC[mongo container\nmongo:8.2]
-    ENV --> AC[api container\npython:3.12-slim]
+    ENV[.env file] --> MC[mongo container: mongo:8.2]
+    ENV --> AC[api container: python:3.12-slim]
 
     MC --> VOL[(mongo_data volume)]
-    MC --> INIT[mongo-init.js\ncreates app_user]
+    MC --> INIT[mongo-init.js: creates app_user]
 
-    AC --> APP[uvicorn\napp.main:app\n:8000]
+    AC --> APP[uvicorn app.main:app:8000]
     AC -->|depends_on healthy| MC
 
     subgraph app_network
@@ -33,7 +33,7 @@ Two services share a bridge network. The API waits for MongoDB's healthcheck to 
 
 ```mermaid
 flowchart LR
-    A[create_app] --> B[Register routers /api/v1/tools /api/v1/agents /api/v1/runs]
+    A[create_app] --> B[Register routers: /api/v1/tools /api/v1/agents /api/v1/runs]
     A --> C[lifespan]
     C --> D[init_db\connect PyMongo\init Beanie]
     D --> E[App ready]
