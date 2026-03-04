@@ -28,8 +28,8 @@ A multi-tenant REST API for managing AI agents, registering tools, and running t
 ### 1. Clone the repo
 
 ```bash
-git clone <repo-url>
-cd <project-folder>
+git clone https://github.com/EladAriel/mini-agent-platform.git
+cd mini-agent-platform
 ```
 
 ### 2. Create your `.env` file
