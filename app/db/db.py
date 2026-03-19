@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.models.tool import Tool
 from app.models.agent import Agent
 from app.models.run import AgentRun
+from app.models.audit import AuditEvent
 
 # We keep track of the client so we can close it on shutdown
 _client: AsyncMongoClient | None = None
@@ -46,7 +47,8 @@ async def init_db(client: AsyncMongoClient | None = None) -> None:
         document_models=[
             Tool,
             Agent,
-            AgentRun
+            AgentRun,
+            AuditEvent,
         ],
     )
 
@@ -58,3 +60,7 @@ async def close_db() -> None:
     if _client is not None:
         await _client.close()
         _client = None
+
+def get_db_client() -> AsyncMongoClient | None:
+    """Return the active client, or None if not yet initialized."""
+    return _client

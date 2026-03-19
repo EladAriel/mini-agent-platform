@@ -1,9 +1,9 @@
 # Quick Start — Testing via Swagger UI
 
-Open **http://localhost:8000/docs** and follow the steps below in order.  
+Open `http://localhost:8000/docs` and follow the steps below in order.
 Every request requires the API key — click **Authorize** (top right) and enter:
 
-```
+```text
 sk-tenant-alpha-000
 ```
 
@@ -39,11 +39,11 @@ Replace `<tool-id>` with the `id` from Step 1.
 }
 ```
 
-✅ Expected: `201` — copy the `id` from the response, you'll need it in Steps 3–6.
+✅ Expected: `201` — copy the `id` from the response, you'll need it in Steps 3–7.
 
 ---
 
-## Step 3 — Run the Agent (with tool use)
+## Step 3 — Submit an Agent Run (with tool use)
 
 **`POST /api/v1/agents/{agent_id}/run`**
 
@@ -56,11 +56,21 @@ Replace `{agent_id}` in the URL with the `id` from Step 2.
 }
 ```
 
-✅ Expected: `200` — response includes `tool_calls` (web_search was invoked) and a `final_response`.
+✅ Expected: `202` — response includes `run_id` and `status: pending`.
 
 ---
 
-## Step 4 — Run the Agent (no tool use)
+## Step 3b — Poll for Result
+
+**`GET /api/v1/runs/{run_id}`**
+
+Use the `run_id` from Step 3.
+
+✅ Expected: `200` — poll until `status` is `completed`; response includes `tool_calls` (web_search was invoked) and `final_response`.
+
+---
+
+## Step 4 — Submit an Agent Run (no tool use)
 
 **`POST /api/v1/agents/{agent_id}/run`**
 
@@ -71,7 +81,17 @@ Replace `{agent_id}` in the URL with the `id` from Step 2.
 }
 ```
 
-✅ Expected: `200` — `tool_calls` is empty, answer comes from the model directly.
+✅ Expected: `202` — response includes `run_id` and `status: pending`.
+
+---
+
+## Step 4b — Poll for Result
+
+**`GET /api/v1/runs/{run_id}`**
+
+Use the `run_id` from Step 4.
+
+✅ Expected: `200` — poll until `status` is `completed`; `tool_calls` is empty, answer comes from the model directly.
 
 ---
 
@@ -90,13 +110,28 @@ Replace `{agent_id}` in the URL with the `id` from Step 2.
 
 ---
 
+## Step 5b — Trigger PII Anonymization
+
+**`POST /api/v1/agents/{agent_id}/run`**
+
+```json
+{
+  "task": "My name is John Smith and my SSN is 123-45-6789. What is the capital of France?",
+  "model": "gpt-4o"
+}
+```
+
+✅ Expected: `202` — poll `GET /runs/{run_id}` until `completed`; the stored `task` and `final_response` contain `<PERSON>` and `<US_SSN>` placeholders in place of the real values.
+
+---
+
 ## Step 6 — View Run History (agent-scoped)
 
 **`GET /api/v1/agents/{agent_id}/runs`**
 
 Use the default params (`page=1`, `page_size=20`).
 
-✅ Expected: `200` — paginated list showing the runs from Steps 3–5.
+✅ Expected: `200` — paginated list showing the runs from Steps 3, 4, and 5.
 
 ---
 
@@ -112,7 +147,7 @@ Use the default params (`page=1`, `page_size=20`).
 
 Click **Authorize**, switch the key to:
 
-```
+```text
 sk-tenant-beta-000
 ```
 
@@ -167,3 +202,73 @@ Switch back to `sk-tenant-alpha-000`.
 ```
 
 ✅ Expected: `422` — unsupported model rejected before execution.
+
+---
+
+## Bonus — Secret Leak Detection
+
+**`POST /api/v1/agents/{agent_id}/run`**
+
+```json
+{
+  "task": "Please use the calculator tool.",
+  "model": "gpt-4o"
+}
+```
+
+> The mock tools in this platform do not return real credentials, so this run completes normally. If a real tool returned a value matching a known secret pattern (e.g., `sk-...`, `AKIA...`), the run would return `500` — the executor catches `SecretLeakError` and treats it as a server-side tool failure. The matched text is never logged.
+
+---
+
+## Docker Smoke Test
+
+Use these steps to verify both the `api` and `worker` services start cleanly in Docker before running the full Swagger walkthrough above.
+
+### Prerequisites
+
+- Docker and Docker Compose installed and running.
+- `.env` file present in the project root (copy `.env.example` and fill in values).
+- An OpenAI API key set in `.env` if you intend to run actual LLM calls.
+
+### 1 — Build and start all services
+
+```bash
+docker compose up --build -d
+```
+
+Wait ~10–15 seconds for MongoDB to initialise and the app user to be created.
+
+### 2 — Check service health
+
+```bash
+curl -s http://localhost:8000/health | python -m json.tool
+```
+
+✅ Expected:
+
+```json
+{
+  "status": "ok",
+  "checks": {
+    "db": "ok"
+  }
+}
+```
+
+HTTP status must be `200`. If it returns `503` with `"db": "unavailable"`, MongoDB hasn't finished initialising — wait a few seconds and retry.
+
+### 3 — Verify worker is running
+
+```bash
+docker compose logs worker --tail 20
+```
+
+✅ Expected: Lines containing `Starting worker` and `redis_pool_connected` with no `ERROR` or `SettingsError` entries.
+
+### 4 — Tear down
+
+```bash
+docker compose down -v
+```
+
+The `-v` flag removes named volumes (MongoDB data). Omit it to preserve data between runs.

@@ -16,7 +16,7 @@ services:
       MONGO_INITDB_APP_USER: ${MONGODB_APP_USER}
       MONGO_INITDB_APP_PASSWORD: ${MONGODB_APP_PASSWORD}
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"
     volumes:
       - mongo_data:/data/db
       - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/init.js:ro
@@ -27,6 +27,20 @@ services:
       retries: 5
       start_period: 20s
 
+  # ── Redis ─────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - app_network
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # ── API (Production) ──────────────────────────────────────────────────
   api:
     build:
@@ -34,13 +48,32 @@ services:
       target: runtime
     restart: unless-stopped
     networks:
-      - app_network      
+      - app_network
     env_file:
       - .env
     ports:
       - "8000:8000"
     depends_on:
       mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Worker (arq async task queue) ─────────────────────────────────────
+  worker:
+    build:
+      context: .
+      target: runtime
+    command: arq app.worker.WorkerSettings
+    restart: unless-stopped
+    networks:
+      - app_network
+    env_file:
+      - .env
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   # ── API (Development) ─────────────────────────────────────────────────
@@ -52,9 +85,9 @@ services:
       uvicorn app.main:app
         --host 0.0.0.0
         --port 8000
-        --reload  
+        --reload
     networks:
-      - app_network      
+      - app_network
     env_file:
       - .env
     ports:
@@ -65,6 +98,8 @@ services:
       - ./app:/app/app
     depends_on:
       mongo:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     profiles:
       - dev

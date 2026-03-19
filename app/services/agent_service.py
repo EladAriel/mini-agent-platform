@@ -68,6 +68,7 @@ async def _resolve_tools(
     tools = await Tool.find(
         {"_id": {"$in": oids}},
         Tool.tenant_id == tenant_id,
+        Tool.deleted_at == None,
     ).to_list()
 
     if len(tools) != len(tools_ids):
@@ -116,7 +117,7 @@ async def create_agent(
             updated_at  = datetime(2024, 1, 15, 10, 0, 0),
         )
     """
-    logger.info("Creating agent: name=%s tenant=%s", data.name, tenant_id)
+    logger.info("Creating agent: name=%s", data.name)
     tools = await _resolve_tools(tenant_id, data.tool_ids)
     agent = Agent(
         tenant_id=tenant_id,
@@ -158,15 +159,16 @@ async def get_agent(
         agent_id = "000000000000000000000000"
         #### → find_one returns None → HTTPException(404, "Agent not found.")
     """
-    logger.debug("Fetching agent: id=%s tenant=%s", agent_id, tenant_id)
+    logger.debug("Fetching agent: id=%s", agent_id)
     agent = await Agent.find_one(
         Agent.id == parse_id(agent_id, "Agent not found."),
         Agent.tenant_id == tenant_id,
+        Agent.deleted_at == None,
         fetch_links=True,
     )
 
     if not agent:
-        logger.warning("Agent not found: id=%s tenant=%s", agent_id, tenant_id)
+        logger.warning("Agent not found: id=%s", agent_id)
         raise not_found("Agent not found.")
 
     logger.debug("Agent fetched successfully: id=%s", agent.id)
@@ -213,14 +215,15 @@ async def list_agents(
         tool_name = "translator"
         #### → no tool names contain "translator" → returns []
     """
-    logger.debug("Listing agents: tenant=%s tool_name=%s", tenant_id, tool_name)
+    logger.debug("Listing agents: tool_name=%s", tool_name)
     agents = await Agent.find(
         Agent.tenant_id == tenant_id,
+        Agent.deleted_at == None,
         fetch_links=True,
     ).to_list()
 
     if tool_name is None:
-        logger.debug("Listed %d agents for tenant=%s", len(agents), tenant_id)
+        logger.debug("Listed %d agents", len(agents))
         return agents
 
     filtered = [
@@ -271,21 +274,16 @@ async def update_agent(
         #### UNHAPPY PATH — agent not found
         #### get_agent() raises HTTPException(404) before any updates are built
     """
-    logger.info("Updating agent: id=%s tenant=%s", agent_id, tenant_id)
+    logger.info("Updating agent: id=%s", agent_id)
     agent = await get_agent(tenant_id, agent_id)
 
-    updates: dict = {
-        "updated_at": datetime.now(timezone.utc)
-    }
+    updates = data.model_dump(exclude_none=True, exclude={"tool_ids"})
+    updates["updated_at"] = datetime.now(timezone.utc)
 
     if data.name is not None:
-        updates["name"] = data.name
         logger.debug("Updating agent name to: %s", data.name)
     if data.role is not None:
-        updates["role"] = data.role
         logger.debug("Updating agent role to: %s", data.role)
-    if data.description is not None:
-        updates["description"] = data.description
     if data.tool_ids is not None:
         tools = await _resolve_tools(tenant_id, data.tool_ids)
         updates["tools"] = [tool.to_ref() for tool in tools]
@@ -319,9 +317,7 @@ async def delete_agent(
         #### get_agent() raises HTTPException(404) before delete is ever attempted
         #### The DB is never touched — no wasted round-trip
     """
-    logger.info("Deleting agent: id=%s tenant=%s", agent_id, tenant_id)
-    logger.info("Deleting agent: id=%s tenant=%s", agent_id, tenant_id)
+    logger.info("Deleting agent: id=%s", agent_id)
     agent = await get_agent(tenant_id, agent_id)
-    await agent.delete()
-    logger.info("Agent deleted successfully: id=%s", agent_id)
-    logger.info("Agent deleted successfully: id=%s", agent_id)
+    await agent.update({"$set": {"deleted_at": datetime.now(timezone.utc)}})
+    logger.info("Agent soft-deleted: id=%s", agent_id)

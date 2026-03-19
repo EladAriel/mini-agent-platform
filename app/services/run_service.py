@@ -4,9 +4,11 @@ Run history retrieval — Beanie ODM queries against the 'agent_runs' collection
 
 import math
 
+from fastapi import HTTPException
+
 from app.core.logging import get_logger
 from app.models.run import AgentRun
-from app.schemas.run import PaginatedRuns, RunRead, ToolCallRecord
+from app.schemas.run import PaginatedRuns, RunRead
 
 logger = get_logger(__name__)
 
@@ -25,7 +27,7 @@ def _to_schema(run: AgentRun) -> RunRead:
                                tool_input="latest AI news", tool_output="...")],
             final_response = "Here is a summary...",
             steps          = 1,
-            status         = "success",
+            status         = "completed",
             created_at     = datetime(2024, 1, 15, 10, 0, 0),
         )
 
@@ -38,7 +40,7 @@ def _to_schema(run: AgentRun) -> RunRead:
             tool_calls     = [ToolCallRecord(step=1, tool_name="Web Search", ...)],
             final_response = "Here is a summary...",
             steps          = 1,
-            status         = "success",
+            status         = "completed",
             created_at     = datetime(2024, 1, 15, 10, 0, 0),
         )
     """
@@ -47,19 +49,32 @@ def _to_schema(run: AgentRun) -> RunRead:
         agent_id=run.agent_id,
         model=run.model,
         task=run.task,
-        tool_calls=[
-            ToolCallRecord(
-                step=tool_call.step,
-                tool_name=tool_call.tool_name,
-                tool_input=tool_call.tool_input,
-                tool_output=tool_call.tool_output
-            ) for tool_call in run.tool_calls
-        ],
+        tool_calls=run.tool_calls,
         final_response=run.final_response,
         steps=run.steps,
         status=run.status,
+        error_message=run.error_message,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
         created_at=run.created_at
     )
+
+async def get_run(tenant_id: str, run_id: str) -> AgentRun:
+    """
+    Fetch a single AgentRun by ID scoped to the tenant.
+
+    Raises HTTP 404 if the run_id is malformed, does not exist,
+    or belongs to a different tenant.
+    """
+    from beanie import PydanticObjectId
+    try:
+        oid = PydanticObjectId(run_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    run = await AgentRun.find_one(AgentRun.id == oid, AgentRun.tenant_id == tenant_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    return run
 
 async def list_runs(
         tenant_id: str,
@@ -122,25 +137,41 @@ async def list_runs(
         #### OUTPUT
         PaginatedRuns(items=[], total=0, page=1, page_size=20, pages=1)
     """
-    logger.debug("Listing runs: tenant=%s agent_id=%s page=%d page_size=%d", tenant_id, agent_id, page, page_size)
+    logger.debug("Listing runs: agent_id=%s page=%d page_size=%d", agent_id, page, page_size)
     query: dict = {"tenant_id": tenant_id}
 
     if agent_id:
         query["agent_id"] = agent_id
 
-    total = await AgentRun.find(query).count()
+    match_stage = {"$match": query}
+    pipeline = [
+        {
+            "$facet": {
+                "total": [match_stage, {"$count": "n"}],
+                "items": [
+                    match_stage,
+                    {"$sort": {"created_at": -1}},
+                    {"$skip": (page - 1) * page_size},
+                    {"$limit": page_size},
+                ],
+            }
+        }
+    ]
+
+    results = await AgentRun.aggregate(pipeline).to_list()
+    facet = results[0]
+
+    total_list = facet.get("total", [])
+    total = total_list[0]["n"] if total_list else 0
+
+    items = [
+        _to_schema(AgentRun.model_validate(raw))
+        for raw in facet.get("items", [])
+    ]
     logger.debug("Total runs found: %d", total)
 
-    runs = (
-        await AgentRun.find(query)
-        .sort(-AgentRun.created_at)
-        .skip((page - 1) * page_size)
-        .limit(page_size)
-        .to_list()
-    )
-
     return PaginatedRuns(
-        items=[_to_schema(run) for run in runs],
+        items=items,
         total=total,
         page=page,
         page_size=page_size,
