@@ -77,13 +77,13 @@ Detailed flows for the request and execution pipelines follow below.
 
 ```mermaid
 flowchart LR
-    REQ[Incoming Request] --> SEC[security.py\nresolve_tenant]
-    SEC -->|tenant_id| CTX[context.py\ntenant_ctx ContextVar]
-    SEC -->|request.state.tenant_id| RL[rate_limit.py\n@limiter.limit]
-    CTX --> LOG[logging.py\nTenantContextFilter]
-    LOG --> OTEL[_add_otel_trace_context\ntrace_id + span_id in logs]
-    RL -->|429 if exceeded| ERR[429 Too Many Requests]
-    RL -->|under limit| EP[Endpoint Handler]
+    REQ["Incoming Request"] --> SEC["security.py<br>resolve_tenant"]
+    SEC -->|tenant_id| CTX["context.py<br>tenant_ctx ContextVar"]
+    SEC -->|request.state.tenant_id| RL["rate_limit.py<br>@limiter.limit"]
+    CTX --> LOG["logging.py<br>TenantContextFilter"]
+    LOG --> OTEL["_add_otel_trace_context<br>trace_id + span_id in logs"]
+    RL -->|429 if exceeded| ERR["429 Too Many Requests"]
+    RL -->|under limit| EP["Endpoint Handler"]
 ```
 
 ### Execution Pipeline
