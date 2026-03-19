@@ -1,15 +1,22 @@
 """Agent management and execution endpoints."""
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from opentelemetry import propagate as otel_propagate
 
 from app.core.logging import get_logger
+from app.core.rate_limit import limiter
 from app.core.security import resolve_tenant
+from app.core.config import settings
+from app.models.run import AgentRun, RUN_STATUS_PENDING
 from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
-from app.schemas.run import PaginatedRuns, RunRequest, RunResponse
-from app.schemas.tool import ToolRead
+from app.schemas.run import PaginatedRuns, RunRequest, RunSubmitted
 from app.services import agent_service
+from app.services.audit_service import record_event
 from app.services.run_service import list_runs
-from app.services.runner.executor import run_agent
+from app.services.runner.guardrail import check_for_injection, PromptInjectionError
+from app.services.runner.pii import anonymize_text
+from app.api.v1.tools import _to_read as _tool_to_read
+from app.models.audit import AUDIT_EVENT_CREATED
 
 logger = get_logger(__name__)
 
@@ -24,15 +31,7 @@ def _to_read(agent) -> AgentRead:
         name=agent.name,
         role=agent.role,
         description=agent.description,
-        tools=[
-            ToolRead(
-                id=str(tool.id),
-                name=tool.name,
-                description=tool.description,
-                created_at=tool.created_at,
-                updated_at=tool.updated_at
-            ) for tool in agent.tools
-        ],
+        tools=[_tool_to_read(tool) for tool in agent.tools],
         created_at=agent.created_at,
         updated_at=agent.updated_at,
     )
@@ -52,7 +51,7 @@ async def create_agent(
     body: AgentCreate,
     tenant_id: str = Depends(resolve_tenant)
 ):
-    logger.info("API: Create agent request: tenant=%s name=%s", tenant_id, body.name)
+    logger.info("API: Create agent request: name=%s", body.name)
     result = _to_read(
         await agent_service.create_agent(tenant_id, body)
     )
@@ -73,7 +72,7 @@ async def list_agents(
     tool_name: str | None = Query(None, description="Filter agents by tool name (partial match)."),
     tenant_id: str = Depends(resolve_tenant),
 ):
-    logger.debug("API: List agents request: tenant=%s tool_name=%s", tenant_id, tool_name)
+    logger.debug("API: List agents request: tool_name=%s", tool_name)
     return [
         _to_read(agent) for agent in await agent_service.list_agents(tenant_id, tool_name)
     ]
@@ -88,7 +87,7 @@ async def get_agent(
     agent_id: str,
     tenant_id: str = Depends(resolve_tenant)
 ):
-    logger.debug("API: Get agent request: tenant=%s agent_id=%s", tenant_id, agent_id)
+    logger.debug("API: Get agent request: agent_id=%s", agent_id)
     return _to_read(
         await agent_service.get_agent(tenant_id, agent_id)
     )
@@ -107,7 +106,7 @@ async def update_agent(
     body: AgentUpdate,
     tenant_id: str = Depends(resolve_tenant)
 ):
-    logger.info("API: Update agent request: tenant=%s agent_id=%s", tenant_id, agent_id)
+    logger.info("API: Update agent request: agent_id=%s", agent_id)
     result = _to_read(
         await agent_service.update_agent(tenant_id, agent_id, body)
     )
@@ -118,34 +117,100 @@ async def update_agent(
     "/{agent_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete an agent",
-    description="Permanently delete an agent. Returns 404 if the agent does not exist or belongs to a different tenant.",
+    description="Soft-delete an agent (sets deleted_at). The agent is excluded from all future queries. Returns 404 if the agent does not exist or belongs to a different tenant.",
 )
 async def delete_agent(
     agent_id: str,
     tenant_id: str = Depends(resolve_tenant)
 ):
-    logger.info("API: Delete agent request: tenant=%s agent_id=%s", tenant_id, agent_id)
+    logger.info("API: Delete agent request: agent_id=%s", agent_id)
     await agent_service.delete_agent(tenant_id, agent_id)
     logger.info("API: Agent deleted: id=%s", agent_id)
 
 @router.post(
     "/{agent_id}/run",
-    response_model=RunResponse,
-    summary="Run an agent",
+    response_model=RunSubmitted,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Submit an agent run",
     description=(
-        "Execute an agent against a given task using the specified model. "
-        "The agent will use its assigned tools to complete the task and return "
-        "a full run record including tool call traces and the final response."
+        "Enqueue an agent execution against a given task. "
+        "Returns HTTP 202 immediately with a `run_id`. "
+        "Poll `GET /runs/{run_id}` until `status` is `completed` or `failed`."
     ),
 )
+@limiter.limit(settings.RATE_LIMIT_RUN_ENDPOINT)
 async def run_agent_endpoint(
     agent_id: str,
     body: RunRequest,
+    request: Request,
+    response: Response,
     tenant_id: str = Depends(resolve_tenant),
 ):
-    logger.info("API: Run agent request: tenant=%s agent_id=%s model=%s", tenant_id, agent_id, body.model)
+    logger.info("API: Run agent request: agent_id=%s model=%s", agent_id, body.model)
+
+    # 404 guard — verify the agent exists before creating any document
     agent = await agent_service.get_agent(tenant_id, agent_id)
-    return await run_agent(agent, body, tenant_id)
+
+    # Injection guard at submit time — fast reject before a pending doc is created
+    # detail is intentionally generic: returning str(exc) would leak the matched
+    # pattern and text, enabling attackers to iterate payloads to bypass detection.
+    try:
+        check_for_injection(body.task)
+    except PromptInjectionError as exc:
+        logger.warning(
+            "Injection attempt blocked: agent_id=%s category=%s",
+            agent_id, exc.category,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Request blocked: input policy violation.",
+        ) from exc
+
+    # Anonymize the task before any persistence or logging — PII is replaced
+    # with labeled placeholders (e.g. <PERSON>, <EMAIL_ADDRESS>) at the API
+    # layer so neither the DB document nor log lines ever contain raw PII.
+    # Injection check runs first on the raw string (safety order invariant).
+    anon_task = anonymize_text(body.task)
+
+    # Pre-create the pending run document so clients can poll immediately
+    run = AgentRun(
+        tenant_id=tenant_id,
+        agent_id=str(agent.id),
+        model=body.model,
+        task=anon_task,
+        status=RUN_STATUS_PENDING,
+    )
+    await run.insert()
+
+    await record_event(
+        run_id=str(run.id),
+        tenant_id=tenant_id,
+        agent_id=str(agent.id),
+        event=AUDIT_EVENT_CREATED,
+    )
+
+    # Enqueue for async execution
+    trace_carrier: dict[str, str] = {}
+    otel_propagate.inject(trace_carrier)   # serializes active span as W3C traceparent
+
+    await request.app.state.arq_pool.enqueue_job(
+        "run_agent_task",
+        run_id=str(run.id),
+        agent_id=str(agent.id),
+        tenant_id=tenant_id,
+        task=anon_task,
+        model=body.model,
+        trace_carrier=trace_carrier,
+    )
+    logger.info("API: Run enqueued: run_id=%s agent_id=%s", run.id, agent_id)
+
+    return RunSubmitted(
+        run_id=str(run.id),
+        status=RUN_STATUS_PENDING,
+        agent_id=str(agent.id),
+        model=body.model,
+        created_at=run.created_at,
+    )
 
 @router.get(
     "/{agent_id}/runs",
@@ -163,7 +228,7 @@ async def get_agent_runs(
     page_size: int = Query(20, ge=1, le=100, description="Number of runs per page (max 100)."),
     tenant_id: str = Depends(resolve_tenant),
 ):
-    logger.debug("API: Get agent runs request: tenant=%s agent_id=%s page=%d", tenant_id, agent_id, page)
+    logger.debug("API: Get agent runs request: agent_id=%s page=%d", agent_id, page)
     await agent_service.get_agent(tenant_id, agent_id)
     return await list_runs(
         tenant_id,

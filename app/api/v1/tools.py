@@ -34,7 +34,7 @@ async def create_tool(
     body: ToolCreate,
     tenant_id: str = Depends(resolve_tenant)
 ):
-    logger.info("API: Create tool request: tenant=%s name=%s", tenant_id, body.name)
+    logger.info("API: Create tool request: name=%s", body.name)
     result = _to_read(
         await tool_service.create_tool(tenant_id, body)
     )
@@ -55,7 +55,7 @@ async def list_tools(
     agent_name: str | None = Query(None),
     tenant_id: str = Depends(resolve_tenant)
 ):
-    logger.debug("API: List tools request: tenant=%s agent_name=%s", tenant_id, agent_name)
+    logger.debug("API: List tools request: agent_name=%s", agent_name)
     return [
         _to_read(tool) for tool in await tool_service.list_tools(tenant_id, agent_name)
     ]
@@ -70,7 +70,7 @@ async def get_tool(
     tool_id: str,
     tenant_id: str = Depends(resolve_tenant)
 ):
-    logger.debug("API: Get tool request: tenant=%s tool_id=%s", tenant_id, tool_id)
+    logger.debug("API: Get tool request: tool_id=%s", tool_id)
     return _to_read(
         await tool_service.get_tool(tenant_id, tool_id)
     )
@@ -86,7 +86,7 @@ async def update_tool(
     body: ToolUpdate,
     tenant_id: str = Depends(resolve_tenant)
 ):
-    logger.info("API: Update tool request: tenant=%s tool_id=%s", tenant_id, tool_id)
+    logger.info("API: Update tool request: tool_id=%s", tool_id)
     result = _to_read(
         await tool_service.update_tool(tenant_id, tool_id, body)
     )
@@ -97,12 +97,12 @@ async def update_tool(
     "/{tool_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a tool",
-    description="Permanently delete a tool. Returns 404 if the tool does not exist or belongs to a different tenant.",
+    description="Soft-delete a tool (sets deleted_at). The tool is excluded from all future queries. Returns 404 if the tool does not exist or belongs to a different tenant.",
 )
 async def delete_tool(
     tool_id: str,
     tenant_id: str = Depends(resolve_tenant)
 ):
-    logger.info("API: Delete tool request: tenant=%s tool_id=%s", tenant_id, tool_id)
+    logger.info("API: Delete tool request: tool_id=%s", tool_id)
     await tool_service.delete_tool(tenant_id, tool_id)
     logger.info("API: Tool deleted: id=%s", tool_id)

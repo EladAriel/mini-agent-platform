@@ -16,6 +16,8 @@ Public API
 check_for_injection(text)  — call on user-supplied task strings
 check_tool_output(name, output) — call on every tool result before it
                                   re-enters the LangGraph message history
+check_output_content(response)  — call on the LLM's final response before
+                                  returning to the caller
 """
 
 import base64
@@ -49,6 +51,9 @@ _EXFILTRATION_PATTERNS = [
     re.compile(r"\btell\s+me\s+(your\s+)?(system\s+)?(prompt|instructions?|configuration)\b", re.I),
     re.compile(r"\bwhat\s+(are|were)\s+your\s+(original\s+)?(instructions?|system\s+prompt)\b", re.I),
     re.compile(r"\bsystem\s*prompt\b", re.I),
+    re.compile(r"\bexfiltrate\b", re.I),
+    re.compile(r"\b(steal|leak|dump|extract)\s+(all\s+)?(the\s+)?(stored\s+)?(api\s+keys?|credentials?|secrets?|passwords?|tokens?)\b", re.I),
+    re.compile(r"\bsend\s+(it|them|data|results?|output|everything)\s+to\s+(https?://|ftp://)\S+", re.I),
 ]
 
 _DELIMITER_PATTERNS = [
@@ -121,6 +126,69 @@ _ALL_PATTERNS = (
     + [("delimiter_injection", p) for p in _DELIMITER_PATTERNS]
 )
 
+# ── Output-direction harmful content patterns ─────────────────────────────────
+# These are intentionally narrower than _ALL_PATTERNS.  Phrases like
+# "system prompt" or "ignore previous instructions" can legitimately appear in
+# an LLM response that *explains* those concepts.  Output filtering targets
+# only categorically harmful content where any match warrants blocking.
+
+_SELF_HARM_PATTERNS = [
+    re.compile(r"\b(kill|harm|hurt)\s+yourself\b", re.I),
+    re.compile(r"\bsteps?\s+to\s+(commit\s+)?suicide\b", re.I),
+    re.compile(r"\bhow\s+to\s+(commit\s+)?suicide\b", re.I),
+]
+
+_VIOLENCE_PATTERNS = [
+    re.compile(r"\bhow\s+to\s+(make|build|construct|assemble)\s+(an?\s+)?(bomb|explosive|IED|pipe\s*bomb)\b", re.I),
+    re.compile(r"\bsteps?\b.{0,25}(build|make|create)\s+(an?\s+)?(weapon|bomb|explosive)\b", re.I),
+    re.compile(r"\bsynthesi[sz]e\s+(nerve\s+agent|sarin|VX|mustard\s+gas|chemical\s+weapon)\b", re.I),
+]
+
+_CSAM_PATTERNS = [
+    re.compile(r"\b(sexual(ly)?|nude|naked|explicit)\s+.{0,30}(child(ren)?|minors?|underage)\b", re.I),
+    re.compile(r"\b(child(ren)?|minors?|underage)\s+.{0,30}(sexual(ly)?|nude|naked|explicit|pornograph)\b", re.I),
+]
+
+_OUTPUT_HARMFUL_PATTERNS = (
+    [("self_harm_incitement", p) for p in _SELF_HARM_PATTERNS]
+    + [("violence_incitement", p) for p in _VIOLENCE_PATTERNS]
+    + [("csam",                p) for p in _CSAM_PATTERNS]
+)
+
+# ── Secret / credential patterns ──────────────────────────────────────────────
+# Applied only to tool outputs (see check_tool_output). Not applied to user
+# input (false positives on API-key discussions) or LLM output (unlikely path).
+
+_SECRET_PATTERNS = [
+    re.compile(r"\bsk-[A-Za-z0-9\-_]{20,}\b"),                            # OpenAI/Anthropic key
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                                   # AWS Access Key ID
+    re.compile(r"\bBearer\s+[A-Za-z0-9\-_\.~\+/]{20,}", re.I),            # HTTP Bearer token
+    re.compile(r"-----BEGIN [A-Z ]{1,30}-----"),                           # PEM block header
+    re.compile(r"\b(?:api[_\-]?key|apikey|access[_\-]?token|secret[_\-]?key)\s*[=:]\s*[A-Za-z0-9\-_\.~]{16,}", re.I),  # Generic key assignment
+    re.compile(r"\bghp_[A-Za-z0-9]{36}\b"),                               # GitHub PAT
+    re.compile(r"\bxox[baprs]-[0-9A-Za-z\-]{10,}\b"),                     # Slack token
+    re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b"),                            # Google API key
+]
+
+_SECRET_CATEGORY_PATTERNS = (
+    [("secret_openai_key",     _SECRET_PATTERNS[0])]
+    + [("secret_aws_key",      _SECRET_PATTERNS[1])]
+    + [("secret_bearer_token", _SECRET_PATTERNS[2])]
+    + [("secret_pem_block",    _SECRET_PATTERNS[3])]
+    + [("secret_api_key",      _SECRET_PATTERNS[4])]
+    + [("secret_github_token", _SECRET_PATTERNS[5])]
+    + [("secret_slack_token",  _SECRET_PATTERNS[6])]
+    + [("secret_google_key",   _SECRET_PATTERNS[7])]
+)
+
+# Compiled once at import time for O(1) homoglyph detection (replaces per-char loop)
+_HOMOGLYPH_PATTERN = re.compile(
+    "[" + "".join(re.escape(chr(cp)) for cp in _HOMOGLYPH_CODEPOINTS) + "]"
+)
+
+# Pre-compiled base64 pattern (was being re-compiled on every call)
+_BASE64_PATTERN = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
+
 
 # ── Exception ─────────────────────────────────────────────────────────────────
 
@@ -146,6 +214,55 @@ class PromptInjectionError(ValueError):
         self.category = category
         self.matched_text = matched_text
         super().__init__(f"Prompt injection detected [{category}]: '{matched_text}'")
+
+
+class HarmfulOutputError(ValueError):
+    """
+    Raised when the LLM's final response matches a known harmful-content pattern.
+
+    Semantically distinct from PromptInjectionError: this is not a user-supplied
+    attack but a failure in the model's own output. Callers can catch each type
+    independently.
+
+    Example:
+        err = HarmfulOutputError(
+            category="self_harm_incitement",
+            matched_text="how to commit suicide",
+        )
+        str(err)
+        # → "Harmful output detected [self_harm_incitement]: 'how to commit suicide'"
+        err.category      # → "self_harm_incitement"
+        err.matched_text  # → "how to commit suicide"
+    """
+    def __init__(self, category: str, matched_text: str) -> None:
+        self.category = category
+        self.matched_text = matched_text
+        super().__init__(f"Harmful output detected [{category}]: '{matched_text}'")
+
+
+class SecretLeakError(ValueError):
+    """
+    Raised when a tool output contains a pattern matching a known credential format.
+
+    Semantically distinct from PromptInjectionError: this is not a user-supplied
+    attack payload but a server-side failure where a tool or external service
+    returned sensitive credentials in its response. Callers can catch each type
+    independently.
+
+    Example:
+        err = SecretLeakError(
+            category="secret_aws_key",
+            matched_text="AKIAIOSFODNN7EXAMPLE",
+        )
+        str(err)
+        # → "Secret leak detected [secret_aws_key]: 'AKIAIOSFODNN7EXAMPLE'"
+        err.category      # → "secret_aws_key"
+        err.matched_text  # → "AKIAIOSFODNN7EXAMPLE"
+    """
+    def __init__(self, category: str, matched_text: str) -> None:
+        self.category = category
+        self.matched_text = matched_text
+        super().__init__(f"Secret leak detected [{category}]: '{matched_text}'")
 
 
 # ── Internal checks ───────────────────────────────────────────────────────────
@@ -196,12 +313,11 @@ def _check_homoglyphs(text: str) -> None:
         ####       matched_text="non-ASCII homoglyph characters detected")
     """
     normalised = unicodedata.normalize("NFC", text)
-    for char in normalised:
-        if ord(char) in _HOMOGLYPH_CODEPOINTS:
-            raise PromptInjectionError(
-                category="obfuscation",
-                matched_text="non-ASCII homoglyph characters detected",
-            )
+    if _HOMOGLYPH_PATTERN.search(normalised):
+        raise PromptInjectionError(
+            category="obfuscation",
+            matched_text="non-ASCII homoglyph characters detected",
+        )
 
 
 def _check_patterns(text: str) -> None:
@@ -240,15 +356,36 @@ def _check_base64_encoding(text: str) -> None:
         #### → PromptInjectionError(category="override",
         ####       matched_text="ignore all previous instructions")
     """
-    b64_pattern = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
-    for token in b64_pattern.findall(text):
+    for token in _BASE64_PATTERN.findall(text):
         try:
             decoded = base64.b64decode(token).decode("utf-8", errors="ignore")
             _check_patterns(decoded)
         except PromptInjectionError:
-            raise            
+            raise
         except Exception:
             continue  # not valid base64 or not UTF-8 — skip
+
+
+def _check_secrets(text: str) -> None:
+    """
+    Scan text for patterns matching known credential and secret formats.
+
+    Why a separate function from _check_patterns:
+    Secret patterns are only applied to tool outputs. Keeping them in a
+    dedicated function preserves single-responsibility and makes the call
+    chain in check_tool_output explicit.
+
+    Example:
+        _check_secrets("result = 42")
+        #### → None
+
+        _check_secrets("token: AKIAIOSFODNN7EXAMPLEKEY")
+        #### → SecretLeakError(category="secret_aws_key",
+        ####       matched_text="AKIAIOSFODNN7EXAMPLEKEY")
+    """
+    for category, pattern in _SECRET_CATEGORY_PATTERNS:
+        if match := pattern.search(text):
+            raise SecretLeakError(category=category, matched_text=match.group(0))
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -312,7 +449,11 @@ def check_tool_output(tool_name: str, output: str) -> str:
     output is a genuine threat regardless of its source.
 
     Returns the (possibly truncated) output if clean.
-    Raises PromptInjectionError if an injection pattern is detected.
+
+    Raises:
+        PromptInjectionError: if an injection pattern is detected.
+        SecretLeakError: if the output contains a known credential pattern
+            (AWS key, OpenAI key, Bearer token, PEM block, GitHub PAT, etc.).
 
     Example:
         #### HAPPY PATH
@@ -330,9 +471,66 @@ def check_tool_output(tool_name: str, output: str) -> str:
         )
         #### → PromptInjectionError(category="override",
         ####       matched_text="ignore all previous instructions")
+
+        #### UNHAPPY PATH — AWS credential in tool output
+        check_tool_output(
+            "config_reader",
+            "aws_access_key_id = AKIAIOSFODNN7EXAMPLEKEY",
+        )
+        #### → SecretLeakError(category="secret_aws_key",
+        ####       matched_text="AKIAIOSFODNN7EXAMPLEKEY")
     """
     if len(output) > MAX_TOOL_OUTPUT_LENGTH:
         output = output[:MAX_TOOL_OUTPUT_LENGTH]
 
     _check_patterns(output)
+    _check_secrets(output)
     return output
+
+
+def check_output_content(response: str) -> None:
+    """
+    Check the LLM's final response for categorically harmful content.
+    Raises HarmfulOutputError on the first match, returns None if clean.
+
+    Why only pattern matching (no invisible-char / homoglyph checks):
+    Invisible characters and homoglyphs are *input-attack* vectors — a user
+    inserts them to bypass the input guardrail. The LLM's own output will not
+    contain deliberate Unicode obfuscation; applying those checks would produce
+    false positives on perfectly normal multilingual text.
+
+    Example:
+        #### HAPPY PATH — normal agent response
+        check_output_content("[gpt-4o] Task complete: Found 10 results for AI research.")
+        # → None
+
+        #### HAPPY PATH — historical violence without instructions
+        check_output_content("The Dresden bombing killed 25,000 civilians in 1945.")
+        # → None
+
+        #### HAPPY PATH — mental health support (supportive, not incitement)
+        check_output_content("If you're struggling, please contact a crisis hotline.")
+        # → None
+
+        #### HAPPY PATH — empty string (executor passes '' when messages is empty)
+        check_output_content("")
+        # → None
+
+        #### UNHAPPY PATH — self-harm incitement
+        check_output_content("Here are the steps to commit suicide: ...")
+        #### → HarmfulOutputError(category="self_harm_incitement",
+        ####       matched_text="steps to commit suicide")
+
+        #### UNHAPPY PATH — violence incitement
+        check_output_content("How to make a bomb: step 1...")
+        #### → HarmfulOutputError(category="violence_incitement",
+        ####       matched_text="How to make a bomb")
+
+        #### UNHAPPY PATH — CSAM
+        check_output_content("Sexually explicit content involving a child")
+        #### → HarmfulOutputError(category="csam",
+        ####       matched_text="sexually explicit content involving a child")
+    """
+    for category, pattern in _OUTPUT_HARMFUL_PATTERNS:
+        if match := pattern.search(response):
+            raise HarmfulOutputError(category=category, matched_text=match.group(0))

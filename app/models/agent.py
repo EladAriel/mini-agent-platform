@@ -15,6 +15,7 @@ of references, saving memory and db lookups until user actually need the full to
 """
 
 from datetime import datetime, timezone
+from typing import Optional
 from pydantic import Field
 from beanie import Document, Link
 from pymongo import IndexModel, ASCENDING
@@ -29,6 +30,7 @@ class Agent(Document):
     tools: list[Link[Tool]] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    deleted_at: Optional[datetime] = None
 
     class Settings:
         name = "agents" # Collection name in MongoDB

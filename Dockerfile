@@ -3,7 +3,7 @@
 
 # ── Stage 1: dependency resolver ─────────────────────────────────────────────
 
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim@sha256:7026274c107626d7e940e0e5d6730481a4600ae95d5ca7eb532dd4180313fea9 AS builder
 
 WORKDIR /build
 
@@ -19,7 +19,7 @@ RUN uv pip install \
 
 # ── Stage 2: runtime image ────────────────────────────────────────────────────
 
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:7026274c107626d7e940e0e5d6730481a4600ae95d5ca7eb532dd4180313fea9 AS runtime
 
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 
@@ -32,14 +32,14 @@ COPY app/ ./app/
 # Give the appuser permission to use the files
 RUN chown -R appuser:appgroup /app
 
-# Switche from "root" (admin) to restricted user
+# Switch from "root" (admin) to restricted user
 USER appuser
 
 # App listends on port 8000
 EXPOSE 8000
 
 # Every 30 seconds, dokcer pings the app to make sure it's still alive
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
 
 # Start server

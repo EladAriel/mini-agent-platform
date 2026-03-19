@@ -34,15 +34,16 @@ async def create_tool(
         #### OUTPUT
         Tool(id="64b1f2c3d4e5f6a7b8c9d0e1", tenant_id="tenant_abc", name="Web Search", ...)
     """    
-    logger.info("Creating tool: name=%s tenant=%s", data.name, tenant_id)
+    logger.info("Creating tool: name=%s", data.name)
 
-    # Check for duplicate tool name within the tenant
+    # Check for duplicate tool name within the tenant (exclude soft-deleted)
     existing = await Tool.find_one(
         Tool.tenant_id == tenant_id,
-        Tool.name == data.name
+        Tool.name == data.name,
+        Tool.deleted_at == None,
     )
     if existing:
-        logger.warning("Tool name already exists: name=%s tenant=%s", data.name, tenant_id)
+        logger.warning("Tool name already exists: name=%s", data.name)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Tool with name '{data.name}' already exists for this tenant."
@@ -82,14 +83,15 @@ async def get_tool(
         tool_id = "000000000000000000000000"
         #### → find_one returns None → HTTPException(404, "Tool not found.")
     """    
-    logger.debug("Fetching tool: id=%s tenant=%s", tool_id, tenant_id)
+    logger.debug("Fetching tool: id=%s", tool_id)
     tool = await Tool.find_one(
         Tool.id == parse_id(tool_id, "Tool not found."),
-        Tool.tenant_id == tenant_id
+        Tool.tenant_id == tenant_id,
+        Tool.deleted_at == None,
     )
 
     if not tool:
-        logger.warning("Tool not found: id=%s tenant=%s", tool_id, tenant_id)
+        logger.warning("Tool not found: id=%s", tool_id)
         raise not_found("Tool not found.")
 
     logger.debug("Tool fetched successfully: id=%s", tool.id)
@@ -143,12 +145,13 @@ async def list_tools(
         tool_ids = []
         #### → short-circuits immediately, returns [] without a second DB query
     """    
-    logger.debug("Listing tools: tenant=%s agent_name=%s", tenant_id, agent_name)
+    logger.debug("Listing tools: agent_name=%s", agent_name)
     if not agent_name:
         tools = await Tool.find(
-            Tool.tenant_id == tenant_id
+            Tool.tenant_id == tenant_id,
+            Tool.deleted_at == None,
         ).to_list()
-        logger.debug("Listed %d tools for tenant=%s", len(tools), tenant_id)
+        logger.debug("Listed %d tools", len(tools))
         return tools
 
     agents = await Agent.find(
@@ -166,7 +169,8 @@ async def list_tools(
 
     tools = await Tool.find(
         {"_id": {"$in": tool_ids}},
-        Tool.tenant_id == tenant_id
+        Tool.tenant_id == tenant_id,
+        Tool.deleted_at == None,
     ).to_list()
     logger.debug("Filtered tools by agent_name='%s': %d results", agent_name, len(tools))
     return tools
@@ -210,7 +214,7 @@ async def update_tool(
         #### UNHAPPY PATH — tool not found
         #### get_tool() raises HTTPException(404) before updates are even built
     """    
-    logger.info("Updating tool: id=%s tenant=%s", tool_id, tenant_id)
+    logger.info("Updating tool: id=%s", tool_id)
     tool = await get_tool(tenant_id, tool_id)
     updates = data.model_dump(exclude_none=True)
     updates["updated_at"] = datetime.now(timezone.utc)
@@ -219,12 +223,13 @@ async def update_tool(
     if "name" in updates and updates["name"] != tool.name:
         existing = await Tool.find_one(
             Tool.tenant_id == tenant_id,
-            Tool.name == updates["name"]
+            Tool.name == updates["name"],
+            Tool.deleted_at == None,
         )
         if existing:
             logger.warning(
-                "Cannot update tool: name '%s' already exists for tenant=%s",
-                updates["name"], tenant_id
+                "Cannot update tool: name '%s' already exists",
+                updates["name"]
             )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -264,7 +269,7 @@ async def delete_tool(
         #### get_tool() raises HTTPException(404) before delete is ever attempted
         #### The DB is never touched — no wasted round-trip
     """    
-    logger.info("Deleting tool: id=%s tenant=%s", tool_id, tenant_id)
+    logger.info("Deleting tool: id=%s", tool_id)
     tool = await get_tool(tenant_id, tool_id)
-    await tool.delete()
-    logger.info("Tool deleted successfully: id=%s", tool_id)
+    await tool.update({"$set": {"deleted_at": datetime.now(timezone.utc)}})
+    logger.info("Tool soft-deleted: id=%s", tool_id)

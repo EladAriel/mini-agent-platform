@@ -105,13 +105,13 @@ class ToolCallRecord(BaseModel):
 class RunRead(BaseModel):
     """
     Schema for viewing a run's details in history or status updates.
-    
+
     Why these fields:
-    - final_response (Optional): Allows the schema to represent runs that 
+    - final_response (Optional): Allows the schema to represent runs that
       are still in progress or failed before completion.
-    - status: Essential for the UI to distinguish between 'success', 
-      'failed', or 'running'.
-    - from_attributes: Enables Beanie to map the DB document directly to 
+    - status: Essential for the UI to distinguish between 'pending', 'running',
+      'completed', or 'failed'.
+    - from_attributes: Enables Beanie to map the DB document directly to
       this schema.
     """
     id: str
@@ -122,6 +122,9 @@ class RunRead(BaseModel):
     final_response: str | None = None
     steps: int
     status: str
+    error_message: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)   
@@ -143,6 +146,24 @@ class RunResponse(BaseModel):
     tool_calls: list[ToolCallRecord]
     steps: int
     status: str
+    created_at: datetime
+
+class RunSubmitted(BaseModel):
+    """
+    Schema returned immediately when a run is enqueued (HTTP 202).
+
+    The run is not yet executing — the client should poll GET /runs/{run_id}
+    until status transitions to 'completed' or 'failed'.
+
+    `task` is intentionally omitted: PII anonymization runs in the API handler
+    before `AgentRun.insert()` (M6), so by the time this 202 is returned the DB
+    already contains the anonymized task. Echoing it back in the response body
+    is unnecessary and adds surface area.
+    """
+    run_id: str
+    status: str        # always "pending" at submission time
+    agent_id: str
+    model: str
     created_at: datetime
     
 class PaginatedRuns(BaseModel):

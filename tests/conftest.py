@@ -38,11 +38,12 @@ from testcontainers.mongodb import MongoDbContainer
 import app.db.db as _db_module
 from app.core.config import settings
 from app.models.agent import Agent
+from app.models.audit import AuditEvent
 from app.models.run import AgentRun
 from app.models.tool import Tool
 
 # Document models registered with Beanie
-_DOCUMENT_MODELS = [Tool, Agent, AgentRun]
+_DOCUMENT_MODELS = [Tool, Agent, AgentRun, AuditEvent]
 
 
 # Session-scoped container -- started once, shared across all tests
@@ -102,6 +103,22 @@ async def isolated_db(mongo_container):
 
 # HTTP test client
 
+class FakeArqPool:
+    """
+    Executes ARQ jobs synchronously in-process — no Redis required.
+
+    enqueue_job() immediately awaits the task function so tests see the
+    completed DB state before any assertions run, exactly as if the worker
+    had processed the job.
+    """
+    async def enqueue_job(self, function_name: str, **kwargs) -> None:
+        from app.worker import run_agent_task
+        await run_agent_task({}, **kwargs)
+
+    async def close(self) -> None:
+        pass
+
+
 @pytest_asyncio.fixture
 async def client(isolated_db):
     """
@@ -109,12 +126,16 @@ async def client(isolated_db):
 
     Depends on isolated_db to guarantee the container client is injected
     before the app lifespan context manager runs.
+
+    FakeArqPool is assigned after lifespan startup so any call to
+    enqueue_job() executes the worker task synchronously in-process.
     """
     from app.main import create_app
 
-    async with AsyncClient(
-        transport=ASGITransport(app=create_app()), base_url="http://test"
-    ) as c:
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        app.state.arq_pool = FakeArqPool()  # override the None sentinel from lifespan
         yield c
 
 
